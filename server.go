@@ -164,6 +164,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, ErrBatchClosed), errors.Is(err, ErrBatchExpired), errors.Is(err, ErrDuplicateApplication), errors.Is(err, ErrInsufficientVolume):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
+	case errors.Is(err, ErrLedgerStorage):
+		writeError(w, http.StatusInternalServerError, "storage_error", err.Error())
 	case strings.Contains(err.Error(), "required"), strings.Contains(err.Error(), "positive"), strings.Contains(err.Error(), "too large"):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:

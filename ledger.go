@@ -25,6 +25,29 @@ type ledgerRecord struct {
 	Batches map[string]batchRecord `json:"batches"`
 }
 
+// ErrLedgerStorage is returned when the ledger fails to persist its records.
+// Storage failures must always surface as HTTP 500 regardless of the
+// underlying error message, so callers classify it explicitly instead of
+// inspecting the message text.
+var ErrLedgerStorage = errors.New("ledger storage error")
+
+type ledgerStorageError struct {
+	cause error
+}
+
+func (e *ledgerStorageError) Error() string  { return e.cause.Error() }
+func (e *ledgerStorageError) Unwrap() error { return e.cause }
+func (e *ledgerStorageError) Is(target error) bool { return target == ErrLedgerStorage }
+
+// wrapStorageError marks err as a ledger storage failure while preserving its
+// original message. Callers can detect it with errors.Is(err, ErrLedgerStorage).
+func wrapStorageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ledgerStorageError{cause: err}
+}
+
 type LedgerOptions struct {
 	Encode func(any) ([]byte, error)
 	Sync   func(*os.File) error
@@ -185,28 +208,28 @@ func (l *Ledger) save(batches map[string]batch) error {
 	}
 	data, err := l.encode(file)
 	if err != nil {
-		return err
+		return wrapStorageError(err)
 	}
 	directory := filepath.Dir(l.path)
 	temporary, err := os.CreateTemp(directory, "."+filepath.Base(l.path)+".tmp-*")
 	if err != nil {
-		return err
+		return wrapStorageError(err)
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
 	if _, err := temporary.Write(data); err != nil {
 		_ = temporary.Close()
-		return err
+		return wrapStorageError(err)
 	}
 	if err := l.sync(temporary); err != nil {
 		_ = temporary.Close()
-		return err
+		return wrapStorageError(err)
 	}
 	if err := temporary.Close(); err != nil {
-		return err
+		return wrapStorageError(err)
 	}
 	if err := l.rename(temporaryPath, l.path); err != nil {
-		return err
+		return wrapStorageError(err)
 	}
 	return nil
 }
