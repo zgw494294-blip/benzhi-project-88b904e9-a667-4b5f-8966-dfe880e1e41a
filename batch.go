@@ -14,6 +14,18 @@ var (
 	ErrInsufficientVolume   = errors.New("application exceeds remaining volume")
 )
 
+type validationError struct {
+	message string
+}
+
+func (e *validationError) Error() string {
+	return e.message
+}
+
+func invalidInput(message string) error {
+	return &validationError{message: message}
+}
+
 type Outcome string
 
 const (
@@ -109,13 +121,13 @@ func (b *batch) addApplication(application Application, now time.Time) error {
 		return ErrBatchExpired
 	}
 	if application.ID == "" {
-		return errors.New("application id is required")
+		return invalidInput("application id is required")
 	}
 	if application.AreaLabel == "" {
-		return errors.New("area label is required")
+		return invalidInput("area label is required")
 	}
 	if application.QuantityML <= 0 {
-		return errors.New("quantityMl must be positive")
+		return invalidInput("quantityMl must be positive")
 	}
 	if _, exists := b.applicationIDs()[application.ID]; exists {
 		return ErrDuplicateApplication

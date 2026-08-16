@@ -159,12 +159,13 @@ func decodeJSON(r *http.Request, destination any) error {
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {
+	var validationErr *validationError
 	switch {
 	case errors.Is(err, ErrBatchNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, ErrBatchClosed), errors.Is(err, ErrBatchExpired), errors.Is(err, ErrDuplicateApplication), errors.Is(err, ErrInsufficientVolume):
 		writeError(w, http.StatusConflict, "conflict", err.Error())
-	case strings.Contains(err.Error(), "required"), strings.Contains(err.Error(), "positive"), strings.Contains(err.Error(), "too large"):
+	case errors.As(err, &validationErr):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, "storage_error", err.Error())

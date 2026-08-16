@@ -3,7 +3,6 @@ package coatwindow
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"strings"
 	"time"
 )
@@ -36,13 +35,13 @@ func NewServiceWithOptions(ledger *Ledger, options ServiceOptions) *Service {
 func (s *Service) OpenBatch(materialName string, startingVolumeML int64, potLife time.Duration) (BatchView, error) {
 	materialName = strings.TrimSpace(materialName)
 	if materialName == "" {
-		return BatchView{}, errors.New("material name is required")
+		return BatchView{}, invalidInput("material name is required")
 	}
 	if startingVolumeML <= 0 {
-		return BatchView{}, errors.New("starting volume must be positive")
+		return BatchView{}, invalidInput("starting volume must be positive")
 	}
 	if potLife <= 0 {
-		return BatchView{}, errors.New("pot life must be positive")
+		return BatchView{}, invalidInput("pot life must be positive")
 	}
 	id, err := s.newID()
 	if err != nil {
