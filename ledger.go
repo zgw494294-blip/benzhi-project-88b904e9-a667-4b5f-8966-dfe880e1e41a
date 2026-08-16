@@ -75,6 +75,9 @@ func NewLedgerWithOptions(path string, options LedgerOptions) (*Ledger, error) {
 func (l *Ledger) load() error {
 	data, err := os.ReadFile(l.path)
 	if errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(filepath.Dir(l.path)); err != nil {
+			return err
+		}
 		return nil
 	}
 	if err != nil {
