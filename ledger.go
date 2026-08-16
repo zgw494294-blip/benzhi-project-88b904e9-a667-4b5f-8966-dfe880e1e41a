@@ -32,12 +32,24 @@ type LedgerOptions struct {
 }
 
 type Ledger struct {
-	path    string
-	mu      sync.RWMutex
-	batches map[string]batch
-	encode  func(any) ([]byte, error)
-	sync    func(*os.File) error
-	rename  func(string, string) error
+	path     string
+	mu       sync.RWMutex
+	commitMu *sync.Mutex
+	batches  map[string]batch
+	encode   func(any) ([]byte, error)
+	sync     func(*os.File) error
+	rename   func(string, string) error
+}
+
+var ledgerCommitLocks sync.Map
+
+func commitLockFor(path string) *sync.Mutex {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	lock, _ := ledgerCommitLocks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
 
 func NewLedger(path string) (*Ledger, error) {
@@ -49,11 +61,12 @@ func NewLedgerWithOptions(path string, options LedgerOptions) (*Ledger, error) {
 		return nil, errors.New("ledger path is required")
 	}
 	ledger := &Ledger{
-		path:    path,
-		batches: make(map[string]batch),
-		encode:  options.Encode,
-		sync:    options.Sync,
-		rename:  options.Rename,
+		path:     path,
+		commitMu: commitLockFor(path),
+		batches:  make(map[string]batch),
+		encode:   options.Encode,
+		sync:     options.Sync,
+		rename:   options.Rename,
 	}
 	if ledger.encode == nil {
 		ledger.encode = func(value any) ([]byte, error) {
@@ -73,17 +86,27 @@ func NewLedgerWithOptions(path string, options LedgerOptions) (*Ledger, error) {
 }
 
 func (l *Ledger) load() error {
-	data, err := os.ReadFile(l.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+	batches, err := l.readBatches()
 	if err != nil {
 		return err
 	}
+	l.batches = batches
+	return nil
+}
+
+func (l *Ledger) readBatches() (map[string]batch, error) {
+	data, err := os.ReadFile(l.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return make(map[string]batch), nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	var file ledgerRecord
 	if err := json.Unmarshal(data, &file); err != nil {
-		return err
+		return nil, err
 	}
+	batches := make(map[string]batch, len(file.Batches))
 	for id, record := range file.Batches {
 		b := batch{
 			id:               record.ID,
@@ -98,14 +121,14 @@ func (l *Ledger) load() error {
 		}
 		copy(b.applications, record.Applications)
 		if b.id != id {
-			return errors.New("ledger key does not match batch id")
+			return nil, errors.New("ledger key does not match batch id")
 		}
 		if err := validateBatch(b); err != nil {
-			return err
+			return nil, err
 		}
-		l.batches[id] = b
+		batches[id] = b
 	}
-	return nil
+	return batches, nil
 }
 
 func (l *Ledger) Add(b batch) error {
@@ -119,10 +142,11 @@ func (l *Ledger) Add(b batch) error {
 	}
 	next := l.copyBatches()
 	next[b.id] = b.clone()
-	if err := l.save(next); err != nil {
+	committed, err := l.save(next, b.id, true)
+	if err != nil {
 		return err
 	}
-	l.batches = next
+	l.batches = committed
 	return nil
 }
 
@@ -142,10 +166,11 @@ func (l *Ledger) Update(id string, update func(*batch) error) (batch, error) {
 	}
 	next := l.copyBatches()
 	next[id] = candidate
-	if err := l.save(next); err != nil {
+	committed, err := l.save(next, id, false)
+	if err != nil {
 		return batch{}, err
 	}
-	l.batches = next
+	l.batches = committed
 	return candidate.clone(), nil
 }
 
@@ -167,7 +192,64 @@ func (l *Ledger) copyBatches() map[string]batch {
 	return next
 }
 
-func (l *Ledger) save(batches map[string]batch) error {
+func (l *Ledger) save(batches map[string]batch, changedID string, adding bool) (map[string]batch, error) {
+	directory := filepath.Dir(l.path)
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(l.path)+".tmp-*")
+	if err != nil {
+		return nil, err
+	}
+	temporaryPath := temporary.Name()
+	preparedPath := temporaryPath + ".prepared"
+	defer os.Remove(temporaryPath)
+	defer os.Remove(preparedPath)
+	if err := temporary.Close(); err != nil {
+		return nil, err
+	}
+	if err := l.rename(temporaryPath, preparedPath); err != nil {
+		return nil, err
+	}
+
+	l.commitMu.Lock()
+	defer l.commitMu.Unlock()
+	committed, err := l.readBatches()
+	if err != nil {
+		return nil, err
+	}
+	if adding {
+		if _, exists := committed[changedID]; exists {
+			return nil, errors.New("batch id already exists")
+		}
+	} else if _, exists := committed[changedID]; !exists {
+		return nil, ErrBatchNotFound
+	}
+	committed[changedID] = batches[changedID].clone()
+
+	data, err := l.encodeLedger(committed)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := os.OpenFile(preparedPath, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := prepared.Write(data); err != nil {
+		_ = prepared.Close()
+		return nil, err
+	}
+	if err := l.sync(prepared); err != nil {
+		_ = prepared.Close()
+		return nil, err
+	}
+	if err := prepared.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(preparedPath, l.path); err != nil {
+		return nil, err
+	}
+	return committed, nil
+}
+
+func (l *Ledger) encodeLedger(batches map[string]batch) ([]byte, error) {
 	file := ledgerRecord{Batches: make(map[string]batchRecord, len(batches))}
 	for id, b := range batches {
 		file.Batches[id] = batchRecord{
@@ -183,30 +265,5 @@ func (l *Ledger) save(batches map[string]batch) error {
 		}
 		copy(file.Batches[id].Applications, b.applications)
 	}
-	data, err := l.encode(file)
-	if err != nil {
-		return err
-	}
-	directory := filepath.Dir(l.path)
-	temporary, err := os.CreateTemp(directory, "."+filepath.Base(l.path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if _, err := temporary.Write(data); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := l.sync(temporary); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := l.rename(temporaryPath, l.path); err != nil {
-		return err
-	}
-	return nil
+	return l.encode(file)
 }
