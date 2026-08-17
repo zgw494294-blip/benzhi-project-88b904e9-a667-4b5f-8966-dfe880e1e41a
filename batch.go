@@ -215,5 +215,12 @@ func validateBatch(b batch) error {
 	if b.closedAt != nil && b.outcome == nil {
 		return errors.New("closed batch has no outcome")
 	}
+	if b.closedAt != nil {
+		switch *b.outcome {
+		case OutcomeFullyApplied, OutcomeExpiredWithRemainder, OutcomeDiscardedWithRemainder:
+		default:
+			return errors.New("closed batch has invalid outcome")
+		}
+	}
 	return nil
 }
