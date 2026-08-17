@@ -105,6 +105,9 @@ func (b *batch) addApplication(application Application, now time.Time) error {
 	if b.closedAt != nil {
 		return ErrBatchClosed
 	}
+	if now.Before(b.mixedAt) {
+		return errors.New("application time cannot be before batch mixing")
+	}
 	if !now.Before(b.expiresAt) {
 		return ErrBatchExpired
 	}
